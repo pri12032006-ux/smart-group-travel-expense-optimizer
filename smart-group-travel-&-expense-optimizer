@@ -1,0 +1,435 @@
+# GROUP TRAVEL EXPENSE MANAGEMENT SYSTEM
+# Combined version of: main.py, storage.py, expenses.py, settlement.py, analytics.py
+
+import csv
+import os
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+# Always use the CSV that sits next to this script
+FILE_NAME = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expenses.csv")
+HEADERS = ["Payer", "Amount", "Category", "Description"]
+
+CATEGORIES = {
+    "1": "Transport",
+    "2": "Food",
+    "3": "Hotel",
+    "4": "Other Expenses",
+}
+
+DESCRIPTION_OPTIONS = {
+    "Transport": {"1": "Car", "2": "Bus", "3": "Train"},
+    "Food": {"1": "Veg", "2": "Non-Veg"},
+    "Hotel": {"1": "4 Star", "2": "5 Star", "3": "7 Star"},
+}
+
+# Budget thresholds for rule-based alerts
+CATEGORY_BUDGET_LIMITS = {
+    "Transport": 5000.0,
+    "Food": 4000.0,
+    "Hotel": 10000.0,
+    "Other Expenses": 3000.0,
+}
+
+
+# ============================================================
+# STORAGE (file handling + reading/writing expenses)
+# ============================================================
+
+def create_file():
+    """Ensure the expenses CSV exists with proper headers."""
+    if not os.path.isfile(FILE_NAME):
+        with open(FILE_NAME, "w", newline="") as file:
+            csv.writer(file).writerow(HEADERS)
+
+
+def read_expenses():
+    """Read all valid expense rows (Amount converted to float)."""
+    create_file()
+    expenses = []
+
+    with open(FILE_NAME, "r", newline="") as file:
+        for row in csv.DictReader(file):
+            try:
+                row["Amount"] = float(row["Amount"])
+                expenses.append(row)
+            except (ValueError, KeyError, TypeError):
+                continue  # skip malformed rows
+
+    return expenses
+
+
+def choose_category():
+    print("\nSelect Expense Category:")
+    for key, value in CATEGORIES.items():
+        print(f"{key}. {value}")
+
+    while True:
+        choice = input("Enter category number (1-4): ").strip()
+        if choice in CATEGORIES:
+            return CATEGORIES[choice]
+        print("Invalid choice. Please select from 1 to 4.")
+
+
+def choose_description(category):
+    if category == "Other Expenses":
+        while True:
+            text = input("Enter expense description: ").strip()
+            if text:
+                return text
+            print("Description cannot be empty.")
+
+    options = DESCRIPTION_OPTIONS[category]
+
+    print("\nSelect Description:")
+    for key, value in options.items():
+        print(f"{key}. {value}")
+
+    while True:
+        choice = input("Enter your choice: ").strip()
+        if choice in options:
+            return options[choice]
+        print("Invalid choice. Please select a listed option.")
+
+
+# ============================================================
+# BUDGET RULE ENGINE
+# ============================================================
+
+def get_category_total(category_name):
+    """Total spending so far for one category."""
+    return sum(r["Amount"] for r in read_expenses() if r["Category"] == category_name)
+
+
+def check_budget_rules(category, new_amount):
+    """Warn if adding new_amount pushes the category over its budget limit."""
+    current_total = get_category_total(category)
+    projected_total = current_total + new_amount
+    limit = CATEGORY_BUDGET_LIMITS.get(category, float("inf"))
+
+    print(f"\n[Budget Check] Current total for {category}: Rs. {current_total:.2f} "
+          f"(Limit: Rs. {limit:.2f})")
+
+    if projected_total > limit:
+        print(f"⚠️  [BUDGET ALERT] This expense will exceed the budget limit for '{category}'!")
+        print(f"Projected Total: Rs. {projected_total:.2f} | Limit: Rs. {limit:.2f}")
+    else:
+        print(f"✅ Spending is within the safe limit for '{category}'.")
+
+
+# ============================================================
+# ADD / VIEW EXPENSES
+# ============================================================
+
+def save_expense():
+    """Ask for a new expense, run budget check, and append it to the CSV."""
+    create_file()
+
+    while True:
+        payer = input("Enter payer name: ").strip()
+        if payer:
+            break
+        print("Payer name cannot be empty.")
+
+    while True:
+        try:
+            amount = float(input("Enter expense amount (Rs.): "))
+            if amount > 0:
+                break
+            print("Amount must be greater than zero.")
+        except ValueError:
+            print("Please enter a valid numerical amount.")
+
+    category = choose_category()
+    description = choose_description(category)
+
+    check_budget_rules(category, amount)
+
+    with open(FILE_NAME, "a", newline="") as file:
+        csv.writer(file).writerow([payer, amount, category, description])
+
+    print(f"\n[SUCCESS] Recorded expense: Rs. {amount:.2f} paid by {payer} "
+          f"for '{description}' ({category}).")
+
+
+def show_expenses():
+    expenses = read_expenses()
+
+    print("\n===== STORED EXPENSE RECORDS =====")
+
+    if not expenses:
+        print("No expense records found.")
+        return
+
+    for record in expenses:
+        print("Payer:", record["Payer"])
+        print(f"Amount: Rs. {record['Amount']:.2f}")
+        print("Category:", record["Category"])
+        print("Description:", record["Description"])
+        print("----------------------------------")
+
+
+# ============================================================
+# SETTLEMENT
+# ============================================================
+
+def compute_net_balances(members):
+    """
+    Net balance per member (positive = should receive, negative = should pay).
+    Payer names are matched case-insensitively.
+    """
+    expenses = read_expenses()
+    lookup = {m.lower(): m for m in members}
+    balances = {m: 0.0 for m in members}
+    unknown_payers = set()
+
+    for record in expenses:
+        amount = record["Amount"]
+        share = amount / len(members)
+        payer = lookup.get(record["Payer"].strip().lower())
+
+        if payer:
+            balances[payer] += amount
+        else:
+            unknown_payers.add(record["Payer"])
+
+        for m in members:
+            balances[m] -= share
+
+    return balances, unknown_payers
+
+
+def suggest_payments(balances):
+    """Turn net balances into a short list of 'A pays B' transfers."""
+    debtors = sorted([[m, -b] for m, b in balances.items() if b < -0.01], key=lambda x: -x[1])
+    creditors = sorted([[m, b] for m, b in balances.items() if b > 0.01], key=lambda x: -x[1])
+    payments = []
+
+    i = j = 0
+    while i < len(debtors) and j < len(creditors):
+        pay = min(debtors[i][1], creditors[j][1])
+        payments.append((debtors[i][0], creditors[j][0], pay))
+        debtors[i][1] -= pay
+        creditors[j][1] -= pay
+        if debtors[i][1] < 0.01:
+            i += 1
+        if creditors[j][1] < 0.01:
+            j += 1
+
+    return payments
+
+
+def get_members():
+    """Ask for group members; pressing Enter uses the payer names found in the CSV."""
+    known = list(dict.fromkeys(r["Payer"].strip() for r in read_expenses() if r["Payer"].strip()))
+
+    while True:
+        if known:
+            print(f"\nPayers found in file: {', '.join(known)}")
+            prompt = "Enter group member names separated by commas (or press Enter to use the above): "
+        else:
+            prompt = "\nEnter group member names separated by commas: "
+
+        names = input(prompt).strip()
+
+        if not names and known:
+            members = known
+        else:
+            members = list(dict.fromkeys(n.strip() for n in names.split(",") if n.strip()))
+
+        if len(members) >= 2:
+            return members
+
+        print("Please enter at least two valid member names.")
+
+
+def calculate_settlement():
+    print("\n---------- EXPENSE SETTLEMENT ----------")
+
+    if not read_expenses():
+        print("No expenses recorded yet. Please add expenses first.")
+        return
+
+    members = get_members()
+
+    try:
+        balances, unknown = compute_net_balances(members)
+    except Exception as error:
+        print("Unable to calculate settlement:", error)
+        return
+
+    print("\n---------- NET BALANCES ----------")
+    for member, balance in balances.items():
+        if balance > 0.01:
+            print(f"{member} should receive: Rs. {balance:.2f}")
+        elif balance < -0.01:
+            print(f"{member} should pay: Rs. {abs(balance):.2f}")
+        else:
+            print(f"{member} is settled.")
+
+    payments = suggest_payments(balances)
+    if payments:
+        print("\n---------- SUGGESTED PAYMENTS ----------")
+        for debtor, creditor, amount in payments:
+            print(f"{debtor} pays {creditor}: Rs. {amount:.2f}")
+
+    if unknown:
+        print(f"\nNote: these payers are not in your member list, so their payments "
+              f"were not credited: {', '.join(sorted(unknown))}")
+
+    print("----------------------------------")
+
+
+# ============================================================
+# ANALYTICS
+# ============================================================
+
+def _totals_by(field):
+    totals = {}
+    for record in read_expenses():
+        totals[record[field]] = totals.get(record[field], 0) + record["Amount"]
+    return totals
+
+
+def total_expenses():
+    total = sum(r["Amount"] for r in read_expenses())
+    print("\n===== TOTAL GROUP EXPENSES =====")
+    print(f"Total Expenses: Rs. {total:.2f}")
+
+
+def category_breakdown():
+    totals = _totals_by("Category")
+    print("\n===== CATEGORY-WISE EXPENSES =====")
+
+    if not totals:
+        print("No expenses available.")
+        return
+
+    for category, amount in totals.items():
+        print(f"{category}: Rs. {amount:.2f}")
+
+
+def member_summary():
+    totals = _totals_by("Payer")
+    print("\n===== INDIVIDUAL PAYMENT SUMMARY =====")
+
+    if not totals:
+        print("No payment records found.")
+        return
+
+    for payer, amount in totals.items():
+        print(f"{payer}: Rs. {amount:.2f}")
+
+
+def highest_spending_category():
+    totals = _totals_by("Category")
+    print("\n===== HIGHEST SPENDING CATEGORY =====")
+
+    if not totals:
+        print("No expenses available.")
+        return
+
+    highest = max(totals, key=totals.get)
+    print("Category:", highest)
+    print(f"Amount: Rs. {totals[highest]:.2f}")
+
+
+def expense_chart(max_width=40):
+    """Text bar chart, scaled so the biggest category is max_width characters."""
+    totals = _totals_by("Category")
+    print("\n===== EXPENSE BAR CHART =====")
+
+    if not totals:
+        print("No expenses available.")
+        return
+
+    biggest = max(totals.values())
+
+    for category, amount in totals.items():
+        bar_length = max(1, round(amount / biggest * max_width))
+        print(f"{category:15} | {'#' * bar_length} Rs. {amount:.2f}")
+
+
+def run_analytics():
+    while True:
+        print("\n===== GROUP TRAVEL ANALYTICS =====")
+        print("1. Total Group Expenses")
+        print("2. Category-wise Breakdown")
+        print("3. Individual Member Summary")
+        print("4. Highest Spending Category")
+        print("5. Expense Bar Chart")
+        print("6. Complete Analytics Report")
+        print("7. Back to Main Menu")
+
+        choice = input("Enter your choice (1-7): ").strip()
+
+        if choice == "1":
+            total_expenses()
+        elif choice == "2":
+            category_breakdown()
+        elif choice == "3":
+            member_summary()
+        elif choice == "4":
+            highest_spending_category()
+        elif choice == "5":
+            expense_chart()
+        elif choice == "6":
+            total_expenses()
+            category_breakdown()
+            member_summary()
+            highest_spending_category()
+            expense_chart()
+        elif choice == "7":
+            break
+        else:
+            print("Invalid choice! Please select from 1 to 7.")
+
+
+# ============================================================
+# MAIN MENU
+# ============================================================
+
+def display_menu():
+    print("\n==========================================")
+    print("       GROUP TRAVEL EXPENSE MANAGER")
+    print("==========================================")
+    print("1. Add New Expense")
+    print("2. View All Expenses")
+    print("3. Calculate Expense Settlement")
+    print("4. View Expense Analytics")
+    print("5. Exit")
+    print("==========================================")
+
+
+def main():
+    create_file()
+
+    print("\nWelcome to Group Travel Expense Management System!")
+
+    while True:
+        display_menu()
+        choice = input("Enter your choice (1-5): ").strip()
+
+        if choice == "1":
+            print("\n---------- ADD NEW EXPENSE ----------")
+            save_expense()
+        elif choice == "2":
+            print("\n---------- ALL EXPENSES ----------")
+            show_expenses()
+        elif choice == "3":
+            calculate_settlement()
+        elif choice == "4":
+            print("\n---------- EXPENSE ANALYTICS ----------")
+            run_analytics()
+        elif choice == "5":
+            print("\nThank you for using Group Travel Expense Manager!")
+            print("Have a safe and happy trip!")
+            break
+        else:
+            print("\nInvalid choice! Please enter a number from 1 to 5.")
+
+
+if __name__ == "__main__":
+    main()
